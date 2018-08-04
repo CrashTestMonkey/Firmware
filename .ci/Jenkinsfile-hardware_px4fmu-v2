@@ -1,0 +1,79 @@
+pipeline {
+  agent none
+
+  stages {
+
+    stage('Build') {
+
+      parallel {
+
+        stage('px4fmu-v2_test') {
+          agent {
+            docker {
+              image 'px4io/px4-dev-nuttx:2018-07-19'
+              args '-e CCACHE_BASEDIR=$WORKSPACE -v ${CCACHE_DIR}:${CCACHE_DIR}:rw'
+            }
+          }
+
+          steps {
+            sh 'export'
+            sh 'make distclean'
+            sh 'ccache -z'
+            sh 'git fetch --tags'
+            sh 'make nuttx_px4fmu-v2_test'
+            sh 'make sizes'
+            sh 'ccache -s'
+            stash includes: 'build/nuttx_px4fmu-v2_test/nuttx_px4fmu-v2_test.elf', name: 'px4fmu-v2_test'
+            sh 'make distclean'
+          }
+        }
+
+      } // parallel
+
+    } // stage Build
+
+    stage('Flash') {
+
+      parallel {
+
+        stage('Flash and Run') {
+          agent {
+            label 'px4fmu-v2'
+          }
+
+          steps {
+            sh 'export'
+            sh 'find /dev/serial'
+            unstash 'px4fmu-v2_test'
+            sh ''' arm-none-eabi-gdb -nx --batch \
+                  -ex 'target extended-remote /dev/serial/by-id/usb-Black_Sphere_Technologies_Black_Magic_Probe_E2C3DAC5-if00' \
+                  -ex 'monitor connect_srst enable' \
+                  -ex 'monitor swdp_scan' \
+                  -ex 'attach 1' \
+                  -ex 'load' \
+                  -ex 'kill' \
+                  build/nuttx_px4fmu-v2_test/nuttx_px4fmu-v2_test.elf
+            '''
+            sh './Tools/HIL/monitor_firmware_upload.py --device /dev/serial/by-id/usb-Black_Sphere_Technologies_Black_Magic_Probe_E2C3DAC5-if02 --baudrate 57600'
+            sh './Tools/HIL/run_tests.py --device /dev/serial/by-id/usb-Black_Sphere_Technologies_Black_Magic_Probe_E2C3DAC5-if02'
+          }
+          options {
+            skipDefaultCheckout()
+            timeout(time: 120, unit: 'SECONDS')
+          }
+        }
+
+      } // parallel
+
+    } // stage Flash
+
+  } // stages
+  environment {
+    CCACHE_DIR = '/tmp/ccache'
+    CI = true
+  }
+  options {
+    buildDiscarder(logRotator(numToKeepStr: '10', artifactDaysToKeepStr: '30'))
+    timeout(time: 60, unit: 'MINUTES')
+  }
+}
